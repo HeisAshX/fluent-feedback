@@ -123,6 +123,51 @@ export default function FluentFeedback() {
     return () => window.removeEventListener('keydown', handleKeyPress);
   }, []);
 
+  // Check if user can submit feedback (rate limiting: 1 per week)
+  const canUserSubmit = (author) => {
+    // Silent bypass for heisashx
+    if (author && (author.toLowerCase().includes('heisashx') || 
+        author.toLowerCase().includes('x.com/heisashx'))) {
+      return true;
+    }
+    
+    if (!author || author === 'anonymous') return true; // Allow anonymous submissions
+    
+    const userKey = author.toLowerCase();
+    const lastSubmission = userSubmissions[userKey];
+    
+    if (!lastSubmission) return true;
+    
+    const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    return lastSubmission < oneWeekAgo;
+  };
+
+  // Get time until user can submit again
+  const getTimeUntilNextSubmission = (author) => {
+    // Silent bypass for heisashx
+    if (author && (author.toLowerCase().includes('heisashx') || 
+        author.toLowerCase().includes('x.com/heisashx'))) {
+      return null;
+    }
+    
+    if (!author || author === 'anonymous') return null;
+    
+    const userKey = author.toLowerCase();
+    const lastSubmission = userSubmissions[userKey];
+    
+    if (!lastSubmission) return null;
+    
+    const nextSubmissionTime = lastSubmission + (7 * 24 * 60 * 60 * 1000);
+    const timeLeft = nextSubmissionTime - Date.now();
+    
+    if (timeLeft <= 0) return null;
+    
+    const days = Math.floor(timeLeft / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((timeLeft % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    
+    return { days, hours };
+  };
+
   // Enhanced Voting with Animations
   const handleVote = (id) => {
     if (votedItems.has(id)) {
@@ -157,39 +202,6 @@ export default function FluentFeedback() {
     if (window.confirm('Are you sure you want to delete this feedback? This action cannot be undone.')) {
       setFeedback(feedback.filter(item => item.id !== id));
     }
-  };
-
-  // Check if user can submit feedback (rate limiting: 1 per week)
-  const canUserSubmit = (author) => {
-    if (!author || author === 'anonymous') return true; // Allow anonymous submissions
-    
-    const userKey = author.toLowerCase();
-    const lastSubmission = userSubmissions[userKey];
-    
-    if (!lastSubmission) return true;
-    
-    const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-    return lastSubmission < oneWeekAgo;
-  };
-
-  // Get time until user can submit again
-  const getTimeUntilNextSubmission = (author) => {
-    if (!author || author === 'anonymous') return null;
-    
-    const userKey = author.toLowerCase();
-    const lastSubmission = userSubmissions[userKey];
-    
-    if (!lastSubmission) return null;
-    
-    const nextSubmissionTime = lastSubmission + (7 * 24 * 60 * 60 * 1000);
-    const timeLeft = nextSubmissionTime - Date.now();
-    
-    if (timeLeft <= 0) return null;
-    
-    const days = Math.floor(timeLeft / (1000 * 60 * 60 * 24));
-    const hours = Math.floor((timeLeft % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-    
-    return { days, hours };
   };
 
   // Extract Twitter handle from tweet URL
