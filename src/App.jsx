@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ThumbsUp, MessageSquare, TrendingUp, Sparkles, X, Zap, Search, Filter, Clock, CheckCircle, PlayCircle, AlertCircle, GitPullRequest, Shield, Twitter, ExternalLink, User, Trash2, Calendar, Heart } from 'lucide-react';
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, addDoc, onSnapshot, updateDoc, deleteDoc, doc, query, orderBy, where } from "firebase/firestore";
 
-// Firebase imports
-import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, addDoc, onSnapshot, updateDoc, deleteDoc, doc, orderBy, query } from 'firebase/firestore';
-
-// Your Firebase config
+// Your Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyC4cS0uIZRHhOjUegMY5TVbcRl2UW5Cfjc",
   authDomain: "feedback-fc0c8.firebaseapp.com",
@@ -21,8 +19,9 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 export default function FluentFeedback() {
-  // Load initial data from Firebase
+  // State for feedback items - now empty as we'll load from Firestore
   const [feedback, setFeedback] = useState([]);
+  
   const [newFeedback, setNewFeedback] = useState({ 
     title: '', 
     description: '', 
@@ -39,7 +38,6 @@ export default function FluentFeedback() {
   const [showModal, setShowModal] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [showRateLimitError, setShowRateLimitError] = useState(false);
-  const [loading, setLoading] = useState(true);
   
   // Search & Filter states
   const [searchTerm, setSearchTerm] = useState('');
@@ -72,33 +70,20 @@ export default function FluentFeedback() {
     { value: 'rejected', label: 'Rejected', icon: AlertCircle, color: 'bg-red-500/10 text-red-400 border-red-500/30' }
   ];
 
-  // Load feedback from Firebase in real-time
+  // Load feedback from Firestore
   useEffect(() => {
-    setLoading(true);
+    const q = query(collection(db, "feedback"), orderBy("createdAt", "desc"));
     
-    let feedbackQuery;
-    if (sortBy === 'votes') {
-      feedbackQuery = query(collection(db, 'feedback'), orderBy('votes', 'desc'));
-    } else if (sortBy === 'newest') {
-      feedbackQuery = query(collection(db, 'feedback'), orderBy('createdAt', 'desc'));
-    } else {
-      feedbackQuery = query(collection(db, 'feedback'), orderBy('createdAt', 'asc'));
-    }
-    
-    const unsubscribe = onSnapshot(feedbackQuery, (snapshot) => {
-      const feedbackData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const feedbackData = [];
+      querySnapshot.forEach((doc) => {
+        feedbackData.push({ id: doc.id, ...doc.data() });
+      });
       setFeedback(feedbackData);
-      setLoading(false);
-    }, (error) => {
-      console.error('Error loading feedback:', error);
-      setLoading(false);
     });
 
     return () => unsubscribe();
-  }, [sortBy]);
+  }, []);
 
   // Save votes and submissions to localStorage
   useEffect(() => {
@@ -114,7 +99,7 @@ export default function FluentFeedback() {
     localStorage.setItem('fluent-admin-mode', isAdmin.toString());
   }, [isAdmin]);
 
-  // Keyboard shortcut for admin mode
+  // CHANGED: Keyboard shortcut for admin mode (Ctrl+Alt+H / Cmd+Alt+H)
   useEffect(() => {
     const handleKeyPress = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key === 'h') {
@@ -126,15 +111,49 @@ export default function FluentFeedback() {
     return () => window.removeEventListener('keydown', handleKeyPress);
   }, []);
 
-  // Check if user can submit feedback
-  const canUserSubmit = (author) => {
-    // Silent bypass for heisashx
-    if (author && (author.toLowerCase().includes('heisashx') || 
-        author.toLowerCase().includes('x.com/heisashx'))) {
-      return true;
+  // Enhanced Voting with Animations and Firestore update
+  const handleVote = async (id) => {
+    if (votedItems.has(id)) {
+      setPulseAnimations(prev => ({ ...prev, [id]: true }));
+      setTimeout(() => setPulseAnimations(prev => ({ ...prev, [id]: false })), 600);
+      return;
     }
     
-    if (!author || author === 'anonymous') return true;
+    setVoteAnimations(prev => ({ ...prev, [id]: true }));
+    
+    // Update in Firestore
+    const feedbackRef = doc(db, "feedback", id);
+    const feedbackItem = feedback.find(item => item.id === id);
+    await updateDoc(feedbackRef, {
+      votes: feedbackItem.votes + 1
+    });
+    
+    setVotedItems(new Set([...votedItems, id]));
+    setTimeout(() => setVoteAnimations(prev => ({ ...prev, [id]: false })), 600);
+  };
+
+  // Status change handler - ONLY for admins with Firestore update
+  const handleStatusChange = async (id, newStatus) => {
+    if (!isAdmin) return;
+    
+    const feedbackRef = doc(db, "feedback", id);
+    await updateDoc(feedbackRef, {
+      status: newStatus
+    });
+  };
+
+  // Delete feedback handler - ONLY for admins with Firestore delete
+  const handleDeleteFeedback = async (id) => {
+    if (!isAdmin) return;
+    
+    if (window.confirm('Are you sure you want to delete this feedback? This action cannot be undone.')) {
+      await deleteDoc(doc(db, "feedback", id));
+    }
+  };
+
+  // Check if user can submit feedback (rate limiting: 1 per week)
+  const canUserSubmit = (author) => {
+    if (!author || author === 'anonymous') return true; // Allow anonymous submissions
     
     const userKey = author.toLowerCase();
     const lastSubmission = userSubmissions[userKey];
@@ -147,12 +166,6 @@ export default function FluentFeedback() {
 
   // Get time until user can submit again
   const getTimeUntilNextSubmission = (author) => {
-    // Silent bypass for heisashx
-    if (author && (author.toLowerCase().includes('heisashx') || 
-        author.toLowerCase().includes('x.com/heisashx'))) {
-      return null;
-    }
-    
     if (!author || author === 'anonymous') return null;
     
     const userKey = author.toLowerCase();
@@ -169,59 +182,6 @@ export default function FluentFeedback() {
     const hours = Math.floor((timeLeft % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
     
     return { days, hours };
-  };
-
-  // FIXED: Enhanced Voting with Animations
-  const handleVote = async (id) => {
-    if (votedItems.has(id)) {
-      setPulseAnimations(prev => ({ ...prev, [id]: true }));
-      setTimeout(() => setPulseAnimations(prev => ({ ...prev, [id]: false })), 600);
-      return;
-    }
-    
-    setVoteAnimations(prev => ({ ...prev, [id]: true }));
-    
-    try {
-      const feedbackRef = doc(db, 'feedback', id);
-      const currentItem = feedback.find(item => item.id === id);
-      await updateDoc(feedbackRef, {
-        votes: (currentItem.votes || 0) + 1
-      });
-      
-      setVotedItems(new Set([...votedItems, id]));
-    } catch (error) {
-      console.error('Error updating vote:', error);
-    }
-    
-    setTimeout(() => setVoteAnimations(prev => ({ ...prev, [id]: false })), 600);
-  };
-
-  // Status change handler
-  const handleStatusChange = async (id, newStatus) => {
-    if (!isAdmin) return;
-    
-    try {
-      const feedbackRef = doc(db, 'feedback', id);
-      await updateDoc(feedbackRef, {
-        status: newStatus
-      });
-    } catch (error) {
-      console.error('Error updating status:', error);
-    }
-  };
-
-  // Delete feedback handler
-  const handleDeleteFeedback = async (id) => {
-    if (!isAdmin) return;
-    
-    if (window.confirm('Are you sure you want to delete this feedback? This action cannot be undone.')) {
-      try {
-        const feedbackRef = doc(db, 'feedback', id);
-        await deleteDoc(feedbackRef);
-      } catch (error) {
-        console.error('Error deleting feedback:', error);
-      }
-    }
   };
 
   // Extract Twitter handle from tweet URL
@@ -251,7 +211,7 @@ export default function FluentFeedback() {
     });
   };
 
-  // FIXED: Submit feedback with proper success flow
+  // Submit feedback to Firestore
   const handleSubmit = async () => {
     if (!newFeedback.title.trim() || !newFeedback.description.trim()) return;
     
@@ -265,15 +225,18 @@ export default function FluentFeedback() {
     }
     
     try {
-      const item = {
-        ...newFeedback,
-        votes: 0,
+      // Add to Firestore
+      await addDoc(collection(db, "feedback"), {
+        title: newFeedback.title,
+        description: newFeedback.description,
         author: authorName,
-        createdAt: Date.now(),
-        twitterHandle: newFeedback.twitterHandle || extractTwitterHandle(newFeedback.tweetUrl)
-      };
-      
-      await addDoc(collection(db, 'feedback'), item);
+        category: newFeedback.category,
+        status: newFeedback.status,
+        tweetUrl: newFeedback.tweetUrl,
+        twitterHandle: newFeedback.twitterHandle || extractTwitterHandle(newFeedback.tweetUrl),
+        votes: 0,
+        createdAt: Date.now()
+      });
       
       // Update rate limiting for non-anonymous users
       if (authorName !== 'anonymous') {
@@ -282,9 +245,6 @@ export default function FluentFeedback() {
           [authorName.toLowerCase()]: Date.now()
         }));
       }
-      
-      // FIXED: Show success first, then close modal
-      setShowSuccess(true);
       
       setNewFeedback({ 
         title: '', 
@@ -295,22 +255,17 @@ export default function FluentFeedback() {
         tweetUrl: '',
         twitterHandle: ''
       });
+      setShowModal(false);
       
       setCurrentUser(authorName);
-      
-      // Close modal after showing success
-      setTimeout(() => {
-        setShowModal(false);
-        setTimeout(() => setShowSuccess(false), 3000);
-      }, 1000);
-      
+      setShowSuccess(true);
+      setTimeout(() => setShowSuccess(false), 3000);
     } catch (error) {
-      console.error('Error submitting feedback:', error);
-      alert('Error submitting feedback. Please try again.');
+      console.error("Error adding document: ", error);
     }
   };
 
-  // Enhanced filtering
+  // Enhanced filtering and sorting
   const filteredAndSortedFeedback = [...feedback]
     .filter(item => {
       const matchesSearch = searchTerm === '' || 
@@ -323,6 +278,12 @@ export default function FluentFeedback() {
       const matchesStatus = selectedStatus === 'All' || item.status === selectedStatus;
       
       return matchesSearch && matchesCategory && matchesStatus;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'votes') return b.votes - a.votes;
+      if (sortBy === 'newest') return b.createdAt - a.createdAt;
+      if (sortBy === 'oldest') return a.createdAt - b.createdAt;
+      return 0;
     });
 
   // Format date for display
@@ -386,10 +347,11 @@ export default function FluentFeedback() {
           </div>
           
           <h1 className="text-7xl font-bold mb-4 bg-gradient-to-r from-purple-400 via-blue-400 to-cyan-400 bg-clip-text text-transparent animate-pulse">
-            Feedback Friday Portal
+           Feedback Friday Portal
           </h1>
           <p className="text-xl text-gray-400 max-w-2xl mb-8">
             Share your ideas on X, then bring them here to track progress. Together we build Fluent.
+            {/* REMOVED: Admin mode instructions */}
           </p>
           
           {/* Rate Limit Info */}
@@ -446,7 +408,7 @@ export default function FluentFeedback() {
           </div>
         </div>
 
-        {/* FIXED: Success Toast - now shows properly */}
+        {/* Success Toast */}
         {showSuccess && (
           <div className="fixed top-8 right-8 bg-gradient-to-r from-green-500 to-emerald-500 text-white px-6 py-4 rounded-xl shadow-2xl shadow-green-500/50 flex items-center gap-3 animate-pulse z-50">
             <Sparkles className="w-5 h-5" />
@@ -471,13 +433,6 @@ export default function FluentFeedback() {
                 })()}
               </p>
             </div>
-          </div>
-        )}
-
-        {/* Loading State */}
-        {loading && (
-          <div className="flex justify-center items-center py-20">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-500"></div>
           </div>
         )}
 
@@ -633,10 +588,352 @@ export default function FluentFeedback() {
           </div>
         )}
 
-        {/* Rest of your existing UI code remains exactly the same */}
-        {/* ... (keeping the same search, filter, and feedback list code) ... */}
+        {/* Enhanced Header with Search & Filters */}
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-6">
+            <TrendingUp className="w-5 h-5 text-purple-400 animate-pulse" />
+            <h2 className="text-2xl font-bold">Community Feedback Portal</h2>
+            <div className="flex-1 h-px bg-gradient-to-r from-purple-500/50 via-blue-500/50 to-transparent" />
+          </div>
+          
+          {/* Search and Filter Bar */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            {/* Search Input */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search className="h-5 w-5 text-gray-400" />
+              </div>
+              <input
+                type="text"
+                placeholder="Search feedback..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-10 pr-4 py-3 bg-black/60 border border-gray-700 rounded-lg focus:border-purple-500 focus:outline-none transition-all font-mono text-sm group-hover:border-purple-500/50"
+              />
+              <div className="absolute inset-0 bg-purple-500/10 rounded-lg blur opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
+            </div>
+            
+            {/* Category Filter */}
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Filter className="h-5 w-5 text-gray-400" />
+              </div>
+              <select
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+                className="w-full pl-10 pr-4 py-3 bg-black/60 border border-gray-700 rounded-lg focus:border-purple-500 focus:outline-none transition-all font-mono text-sm group-hover:border-purple-500/50 appearance-none"
+              >
+                <option value="All">All Categories</option>
+                <option>Feature</option>
+                <option>Bug</option>
+                <option>Developer Experience</option>
+                <option>Infrastructure</option>
+                <option>Documentation</option>
+              </select>
+              <div className="absolute inset-0 bg-blue-500/10 rounded-lg blur opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
+            </div>
+            
+            {/* Status Filter */}
+            <div className="relative group">
+              <select
+                value={selectedStatus}
+                onChange={(e) => setSelectedStatus(e.target.value)}
+                className="w-full px-4 py-3 bg-black/60 border border-gray-700 rounded-lg focus:border-purple-500 focus:outline-none transition-all font-mono text-sm group-hover:border-purple-500/50 appearance-none"
+              >
+                <option value="All">All Statuses</option>
+                <option value="under_review">Under Review</option>
+                <option value="planned">Planned</option>
+                <option value="in_progress">In Progress</option>
+                <option value="completed">Completed</option>
+                <option value="rejected">Rejected</option>
+              </select>
+              <div className="absolute inset-0 bg-cyan-500/10 rounded-lg blur opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
+            </div>
+            
+            {/* Sort Options */}
+            <div className="relative group">
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="w-full px-4 py-3 bg-black/60 border border-gray-700 rounded-lg focus:border-purple-500 focus:outline-none transition-all font-mono text-sm group-hover:border-purple-500/50 appearance-none"
+              >
+                <option value="votes">Sort by Votes</option>
+                <option value="newest">Sort by Newest</option>
+                <option value="oldest">Sort by Oldest</option>
+              </select>
+              <div className="absolute inset-0 bg-purple-500/10 rounded-lg blur opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
+            </div>
+          </div>
+          
+          {/* Results Count */}
+          <div className="flex items-center justify-between mb-4">
+            <span className="text-gray-400 text-sm font-mono">
+              Showing {filteredAndSortedFeedback.length} of {feedback.length} feedback items
+            </span>
+            {(searchTerm || selectedCategory !== 'All' || selectedStatus !== 'All') && (
+              <button
+                onClick={() => {
+                  setSearchTerm('');
+                  setSelectedCategory('All');
+                  setSelectedStatus('All');
+                }}
+                className="text-purple-400 hover:text-purple-300 text-sm font-mono transition-colors flex items-center gap-1"
+              >
+                Clear filters
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </div>
 
+        {/* Feedback List */}
+        <div className="space-y-4">
+          {filteredAndSortedFeedback.map((item, idx) => {
+            const statusConfig = statusOptions.find(s => s.value === item.status) || statusOptions[0];
+            const StatusIcon = statusConfig.icon;
+            
+            return (
+              <div 
+                key={item.id} 
+                className="group relative bg-gradient-to-br from-purple-900/5 to-blue-900/5 hover:from-purple-900/20 hover:to-blue-900/20 rounded-xl border border-gray-800 hover:border-purple-500/50 p-6 transition-all hover:scale-[1.02] hover:shadow-2xl hover:shadow-purple-500/10"
+              >
+                {/* Glow effect on hover */}
+                <div className="absolute inset-0 bg-gradient-to-r from-purple-600/0 via-blue-600/0 to-cyan-600/0 group-hover:from-purple-600/10 group-hover:via-blue-600/10 group-hover:to-cyan-600/10 rounded-xl blur-xl transition-all opacity-0 group-hover:opacity-100" />
+                
+                <div className="relative flex gap-6">
+                  {/* Enhanced Vote Column */}
+                  <div className="flex flex-col items-center gap-2">
+                    <button
+                      onClick={() => handleVote(item.id)}
+                      disabled={votedItems.has(item.id)}
+                      className={`relative flex flex-col items-center gap-1 px-4 py-3 rounded-lg transition-all ${
+                        votedItems.has(item.id)
+                          ? 'bg-purple-500/20 text-purple-400 cursor-not-allowed shadow-lg shadow-purple-500/50'
+                          : 'bg-gray-900 hover:bg-purple-900/30 text-gray-400 hover:text-purple-400 border border-gray-800 hover:border-purple-500/50 hover:shadow-lg hover:shadow-purple-500/30 hover:scale-110'
+                      } ${pulseAnimations[item.id] ? 'animate-pulse-scale' : ''}`}
+                    >
+                      <ThumbsUp className={`w-5 h-5 transition-all ${votedItems.has(item.id) ? 'fill-current' : ''} ${votedItems.has(item.id) ? '' : 'group-hover:scale-110'} ${voteAnimations[item.id] ? 'animate-bounce' : ''}`} />
+                      <span className={`font-bold text-lg font-mono transition-all ${voteAnimations[item.id] ? 'animate-bounce text-purple-300' : ''}`}>
+                        {item.votes}
+                      </span>
+                    </button>
+                    {idx === 0 && item.votes > 0 && (
+                      <div className="flex items-center gap-1 text-xs text-purple-400 font-mono animate-pulse">
+                        <Zap className="w-3 h-3" />
+                        <span>#1 Trending</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Content */}
+                  <div className="flex-1">
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <h3 className="text-xl font-semibold group-hover:text-purple-300 transition-colors">
+                        {item.title}
+                      </h3>
+                      <div className="flex flex-col items-end gap-2">
+                        <span className={`shrink-0 px-3 py-1 rounded-full text-xs font-mono font-medium border ${
+                          item.category === 'Feature' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
+                          item.category === 'Bug' ? 'bg-red-500/10 text-red-400 border-red-500/30' :
+                          item.category === 'Developer Experience' ? 'bg-purple-500/10 text-purple-400 border-purple-500/30' :
+                          item.category === 'Infrastructure' ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' :
+                          'bg-gray-500/10 text-gray-400 border-gray-500/30'
+                        }`}>
+                          {item.category}
+                        </span>
+                        
+                        {/* Status Display - Only editable in Admin Mode */}
+                        {isAdmin ? (
+                          <div className="relative group">
+                            <select
+                              value={item.status}
+                              onChange={(e) => handleStatusChange(item.id, e.target.value)}
+                              className={`shrink-0 px-3 py-1 rounded-full text-xs font-mono font-medium border cursor-pointer transition-all ${statusConfig.color} hover:scale-105`}
+                            >
+                              {statusOptions.map(option => {
+                                const OptionIcon = option.icon;
+                                return (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-10">
+                              Change status (Admin)
+                            </div>
+                          </div>
+                        ) : (
+                          <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-mono font-medium border ${statusConfig.color}`}>
+                            <StatusIcon className="w-3 h-3" />
+                            {statusConfig.label}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <p className="text-gray-400 leading-relaxed mb-3">
+                      {item.description}
+                    </p>
+                    
+                    {/* Author and Twitter Info */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2 text-sm text-gray-500">
+                          <span className="font-mono">by</span>
+                          <span className="text-purple-400 font-mono group-hover:text-purple-300 transition-colors">
+                            {item.author}
+                          </span>
+                          
+                          {/* Twitter Handle */}
+                          {item.twitterHandle && (
+                            <a
+                              href={`https://twitter.com/${item.twitterHandle.replace('@', '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors text-xs"
+                            >
+                              <Twitter className="w-3 h-3" />
+                              {item.twitterHandle}
+                            </a>
+                          )}
+                          
+                          {item.author === currentUser && (
+                            <span className="flex items-center gap-1 text-blue-400 text-xs">
+                              <Sparkles className="w-3 h-3" />
+                              Your feedback
+                            </span>
+                          )}
+                          {item.votes > 10 && (
+                            <span className="flex items-center gap-1 text-orange-400 text-xs">
+                              <Zap className="w-3 h-3" />
+                              Popular
+                            </span>
+                          )}
+                          
+                          {/* Submission Date */}
+                          <span className="flex items-center gap-1 text-gray-500 text-xs">
+                            <Calendar className="w-3 h-3" />
+                            {formatDate(item.createdAt)}
+                          </span>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center gap-2">
+                        {/* Tweet Link */}
+                        {item.tweetUrl && (
+                          <a
+                            href={item.tweetUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 px-3 py-1 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 hover:border-blue-500/50 text-blue-400 hover:text-blue-300 rounded-lg text-xs font-mono transition-all group/tweet"
+                          >
+                            <Twitter className="w-3 h-3" />
+                            View on X
+                            <ExternalLink className="w-3 h-3 group-hover/tweet:translate-x-0.5 transition-transform" />
+                          </a>
+                        )}
+                        
+                        {/* Admin Delete Button */}
+                        {isAdmin && (
+                          <button
+                            onClick={() => handleDeleteFeedback(item.id)}
+                            className="flex items-center gap-2 px-3 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 hover:border-red-500/50 text-red-400 hover:text-red-300 rounded-lg text-xs font-mono transition-all group/delete"
+                            title="Delete this feedback"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Footer - UPDATED: Removed admin instructions */}
+        <div className="mt-16 pt-8 border-t border-gray-800">
+          <div className="text-center">
+            <p className="text-gray-500 text-sm font-mono flex items-center justify-center gap-2 mb-4">
+              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+              Powered by the Fluent community · Built for builders
+            </p>
+            
+            {/* Subtle credit line */}
+            <div className="flex items-center justify-center gap-2 text-gray-600 text-xs">
+              <span>Built with</span>
+              <Heart className="w-3 h-3 text-red-400 fill-current" />
+              <span>by</span>
+              <a 
+                href="https://twitter.com/heisashx" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1"
+              >
+                <Twitter className="w-3 h-3" />
+                @heisashx
+              </a>
+            </div>
+          </div>
+        </div>
       </div>
+
+      <style>{`
+        @keyframes scale-in {
+          from {
+            opacity: 0;
+            transform: scale(0.95);
+          }
+          to {
+            opacity: 1;
+            transform: scale(1);
+          }
+        }
+        
+        @keyframes bounce {
+          0%, 20%, 53%, 80%, 100% {
+            transform: translate3d(0,0,0);
+          }
+          40%, 43% {
+            transform: translate3d(0, -8px, 0);
+          }
+          70% {
+            transform: translate3d(0, -4px, 0);
+          }
+          90% {
+            transform: translate3d(0, -2px, 0);
+          }
+        }
+        
+        @keyframes pulse-scale {
+          0% {
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7);
+          }
+          50% {
+            transform: scale(1.05);
+            box-shadow: 0 0 0 10px rgba(139, 92, 246, 0);
+          }
+          100% {
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(139, 92, 246, 0);
+          }
+        }
+        
+        .animate-scale-in {
+          animation: scale-in 0.2s ease-out;
+        }
+        
+        .animate-bounce {
+          animation: bounce 0.6s ease-in-out;
+        }
+        
+        .animate-pulse-scale {
+          animation: pulse-scale 0.6s ease-in-out;
+        }
+      `}</style>
     </div>
   );
 }
